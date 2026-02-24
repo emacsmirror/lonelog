@@ -58,7 +58,7 @@
   :group 'games
   :prefix "lonelog-")
 
-(defcustom lonelog-auto-start-tag-tracking t
+(defcustom lonelog-auto-open-hud t
   "If t, Lonelog-mode will auto-open the tag tracking buffer when started."
   :type 'bool
   :group 'lonelog)
@@ -68,8 +68,11 @@
   :type 'number
   :group 'lonelog)
 
-(defvar lonelog--hud-timer nil
-  "Internal variable to store the active HUD timer.")
+(defvar-local lonelog--hud-timer nil
+  "Buffer-local variable to store the active HUD timer for this session.")
+
+(defvar-local lonelog--hud-buffer-name nil
+  "Buffer-local variable storing the unique name of this session's HUD.")
 
 
 ;;; Faces:
@@ -243,6 +246,27 @@ Returns a chronologically ordered list of tag strings."
 
 ;;; Tag HUD updater
 
+(defun lonelog--get-visible-hud-window ()
+  "Return the window displaying a Lonelog HUD, if one exists."
+  (seq-find (lambda (win)
+               (string-match-p "^\\*Lonelog HUD"
+                               (buffer-name (window-buffer win))))
+             (window-list)))
+
+(defun lonelog--swap-hud-on-window-change (&optional _)
+  "Swap the HUD buffer to match the active game, if a HUD is open."
+  (when (and lonelog-mode
+             lonelog--hud-buffer-name
+             (not (string-match-p "^\\*Lonelog HUD" (buffer-name))))
+    (let ((hud-buf (get-buffer lonelog--hud-buffer-name))
+          (visible-hud-win (lonelog--get-visible-hud-window)))
+      ;; If our HUD exists, AND a HUD window is open on screen...
+      (when (and hud-buf visible-hud-win
+                 ;; ... and the window isn't ALREADY showing our HUD
+                 (not (eq (window-buffer visible-hud-win) hud-buf)))
+        ;; Lightning-fast swap: just change the text in that exact window
+        (set-window-buffer visible-hud-win hud-buf)))))
+
 (defun lonelog--draw-hud-contents (hud-buffer tags)
   "Wipe HUD-BUFFER and cleanly insert TAGS."
   (with-current-buffer hud-buffer
@@ -263,20 +287,32 @@ Returns a chronologically ordered list of tag strings."
 (defun lonelog-update-hud ()
   "Extract the latest tags and pop open the dedicated side-window HUD."
   (interactive)
+  ;; If we don't have a unique HUD name for this buffer yet, make one!
+  (unless lonelog--hud-buffer-name
+    (setq lonelog--hud-buffer-name (format "Lonelog HUD: %s*" (buffer-name))))
   (let ((tags (lonelog-extract-latest-tags))
-        (hud-buffer (get-buffer-create "*Lonelog HUD*")))
+        (hud-buffer (get-buffer-create lonelog--hud-buffer-name)))
     (lonelog--draw-hud-contents hud-buffer tags)
     (display-buffer hud-buffer
                     '(display-buffer-in-side-window
                       . ((side . right)
                          (window-width . 35))))))
 
-(defun lonelog--update-hud-background ()
-  "Silently update the HUD buffer, but only if the user is looking at it."
-  (when (get-buffer-window "*Lonelog HUD*")
-    (let ((tags (lonelog-extract-latest-tags))
-          (hud-buffer (get-buffer-create "*Lonelog HUD*")))
-      (lonelog--draw-hud-contents hud-buffer tags))))
+(defun lonelog--update-hud-background (source-buffer)
+  "Silently update the HUD for SOURCE-BUFFER, but only if it's visible."
+  ;; 1. Make sure the user hasn't closed the game buffer.
+  (when (buffer-live-p source-buffer)
+    ;; 2. Fetch the unique HUD name for this specific game
+    (let ((hud-name (buffer-local-value 'lonelog--hud-buffer-name
+                                        source-buffer)))
+      ;; 3. If the HUD is currently open on the screen...
+      (when (and hud-name (get-buffer-window hud-name))
+        ;; 4. ... teleport into the game buffer to do the scanning
+        (with-current-buffer source-buffer
+          (let ((tags (lonelog-extract-latest-tags))
+                (hud-buffer (get-buffer-create hud-name)))
+            ;; 5. Draw the results
+            (lonelog--draw-hud-contents hud-buffer tags)))))))
 
 ;;; Minor mode itself:
 
@@ -310,14 +346,21 @@ Tags are also tracked in a side window:
       (progn
         (font-lock-add-keywords nil lonelog-font-lock-keywords)
         (font-lock-flush)
-        (unless (string= (buffer-name) "*Lonelog HUD*)")
-          ;; Start the idle timer.
+
+        ;; Check if the buffer name starts with "*Lonelog HUD"
+        (unless (string-match-p "^\\*Lonelog HUD" (buffer-name))
+          ;; Generate the unique HUD name for this buffer
+          (setq lonelog--hud-buffer-name (format "*Lonelog HUD: %s"
+                                                 (buffer-name)))
+          ;; Start the timer, and hand it the current game buffer.
           (setq lonelog--hud-timer
                 (run-with-idle-timer lonelog-hud-update-delay t
-                                     #'lonelog--update-hud-background))
-          ;; Start tag tracking if lonelog-auto-start-tag-tracking is t
-          (when lonelog-auto-start-tag-tracking
+                                     #'lonelog--update-hud-background
+                                     (current-buffer)))
+          ;; Handle auto-start
+          (when lonelog-auto-open-hud
             (lonelog-update-hud)))
+        
         (message "Lonelog-mode enabled."))
     ;; If OFF:
     (progn
@@ -328,6 +371,9 @@ Tags are also tracked in a side window:
         (cancel-timer lonelog--hud-timer)
         (setq lonelog--hud-timer nil))
       (message "Lonelog-mode disabled."))))
+
+(add-hook 'window-selection-change-functions
+          #'lonelog--swap-hud-on-window-change)
 
 (provide 'lonelog)
 
