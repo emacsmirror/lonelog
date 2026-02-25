@@ -246,23 +246,31 @@ Returns a chronologically ordered list of tag strings."
     ;; 3. Set up our temporary variables for this run.
     (let ((seen-ids (make-hash-table :test 'equal))
           (latest-tags nil)
-          ;; Regex: Group 1 matches anything that isn't a ] or |
-          (tag-regex "\\[\\([^]|]+\\)[^]]*\\]"))
+          ;; Regex: Group 1 matches anything that isn't a ], [, or |
+          (tag-regex "\\[\\([^][|]+\\)[^][]*\\]"))
 
       ;; 4. Loop backwards until we run out of matches.
       (while (re-search-backward tag-regex nil t)
-        (let ((full-tag (match-string-no-properties 0))
-              (tag-id   (match-string-no-properties 1)))
+        (let ((start (match-beginning 0))
+              (end (match-end 0)))
           
-          ;; 5. Have we seen this ID before?
-          (unless (gethash tag-id seen-ids)
-            ;; No? Then this is the newest version.
-            ;; Mark it as seen in the hash table.
-            (puthash tag-id t seen-ids)
-            ;; Add the full tag to the front of our list.
-            (push full-tag latest-tags))))
+          ;; 5. Check if it's wrapped in double brackets (like an Org link).
+          ;; If it is, we completely ignore it.
+          (unless (or (and (> start (point-min)) (eq (char-before start) ?\[))
+                      (and (< end (point-max)) (eq (char-after end) ?\])))
+            
+            (let ((full-tag (match-string-no-properties 0))
+                  (tag-id   (match-string-no-properties 1)))
+              
+              ;; 6. Have we seen this ID before?
+              (unless (gethash tag-id seen-ids)
+                ;; No? Then this is the newest version.
+                ;; Mark it as seen in the hash table.
+                (puthash tag-id t seen-ids)
+                ;; Add the full tag to the front of our list.
+                (push full-tag latest-tags))))))
 
-      ;; 6. Return the finalized list.
+      ;; 7. Return the finalized list.
       latest-tags)))
 
 ;;; Tag HUD updater
